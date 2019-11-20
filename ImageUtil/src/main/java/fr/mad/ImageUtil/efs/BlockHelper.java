@@ -25,17 +25,18 @@ import fr.mad.ImageUtil.MapObjectHelper;
 
 public class BlockHelper implements Closeable {
 	private static final Logger log = Logger.getLogger(BlockHelper.class.getName());
-	private static final int METADATA_SIZE = 1024;
-	private static final int IV_Size = 12;
+	static final int METADATA_SIZE = 1024;
+	static final int IV_Size = 12;
+	private static final int DEFAULT_BLOCK_SIZE = 1024 * 512;
 	
-	private final int blockMetadataSize;
-	private final int blockSize;
-	private final boolean encryptMetadata;
+	final int blockMetadataSize;
+	final int blockSize;
+	final boolean encryptMetadata;
 	private final Key pass;
-	private final String transformation;
+	final String transformation;
 	private final Provider provider;
-	private final short padding;
-	private final Function<byte[], AlgorithmParameterSpec> parameterSpec;
+	final short padding;
+	final Function<byte[], AlgorithmParameterSpec> parameterSpec;
 	private SeekableByteChannel sbc;
 	
 	private ThreadLocal<ByteBuffer> bufferPool = new ThreadLocal<ByteBuffer>() {
@@ -98,7 +99,7 @@ public class BlockHelper implements Closeable {
 		
 		int len = sbc.read(buf);
 		if (len != buf.limit()) {
-			this.blockSize = Math.min(0xFFFF, env.get("blockSize", 1024));
+			this.blockSize = Math.min(0xFFFF, env.get("blockSize", DEFAULT_BLOCK_SIZE));
 			this.encryptMetadata = encryptMetadata;
 			this.transformation = env.get("transformation", "AES/GCM/NoPadding");
 			this.provider = null;//will check installed providers instead
@@ -157,9 +158,11 @@ public class BlockHelper implements Closeable {
 	}
 	
 	/**
+	 * if no data was in this block return bb with position 0
 	 * 
 	 * @param blockID
-	 * @return {@link ByteBuffer} ready to read
+	 * @param bb
+	 *            will be ready to read with block data
 	 * @throws IOException
 	 * @throws BadPaddingException
 	 * @throws IllegalBlockSizeException
@@ -167,34 +170,42 @@ public class BlockHelper implements Closeable {
 	 * @throws InvalidAlgorithmParameterException
 	 * @throws InvalidKeyException
 	 */
-	public ByteBuffer getBlockData(long blockID) throws IOException, ShortBufferException, IllegalBlockSizeException, BadPaddingException, InvalidKeyException, InvalidAlgorithmParameterException {
-		ByteBuffer bb = bufferPool.get();
+	public void getBlockData(long blockID, ByteBuffer bb) throws IOException, ShortBufferException, IllegalBlockSizeException, BadPaddingException, InvalidKeyException, InvalidAlgorithmParameterException {
 		bb.clear();
-		sbc.position(blockID * (blockMetadataSize + blockSize) + blockMetadataSize);
-		int len = sbc.read(bb);
-		if (len != bb.capacity())
-			if (len == -1)
-				return bb.put(new byte[bb.remaining()]);
-			else
-				throw new IOException();
-			
+		if (bb.capacity() < blockSize + padding)
+			throw new ShortBufferException();
+		bb.limit(blockSize + padding);
+		
+		int len;
+		synchronized (sbc) {
+			sbc.position(dataStart(blockID));
+			len = sbc.read(bb);
+		}
+		
+		if (len == -1 && bb.position() == 0)
+			return;
+		
+		if (len != bb.limit())
+			throw new IOException("block incomplete or null");
 		bb.flip();
 		
 		ByteBuffer iv = bufferIVPool.get();
-		sbc.position(ivStart(blockID));
-		sbc.read(iv);//already read into block so no check on len needed
+		synchronized (sbc) {
+			sbc.position(ivStart(blockID));
+			sbc.read(iv);//already read into block so no check on len needed
+		}
 		Cipher cipher = cipherPool.get();
 		initCipher(cipher, false, blockID, iv.array(), false);
 		cipher.doFinal(bb, bb);
 		
 		bb.flip();
-		return bb;
 	}
 	
 	/**
 	 * 
 	 * @param blockID
-	 * @return {@link ByteBuffer} ready to read
+	 * @param bb
+	 *            will be ready to read with block metadata
 	 * @throws IOException
 	 * @throws BadPaddingException
 	 * @throws IllegalBlockSizeException
@@ -202,32 +213,39 @@ public class BlockHelper implements Closeable {
 	 * @throws InvalidAlgorithmParameterException
 	 * @throws InvalidKeyException
 	 */
-	public ByteBuffer getBlockMetaData(long blockID) throws IOException, ShortBufferException, IllegalBlockSizeException, BadPaddingException, InvalidKeyException, InvalidAlgorithmParameterException {
-		ByteBuffer bb = bufferMdPool.get();
+	public void getBlockMetaData(long blockID, ByteBuffer bb) throws IOException, ShortBufferException, IllegalBlockSizeException, BadPaddingException, InvalidKeyException, InvalidAlgorithmParameterException {
+		int size = blockMetadataSize();
 		bb.clear();
-		sbc.position(metadataStart(blockID));
-		if (!encryptMetadata)
-			bb.limit(blockMetadataSize);
-		int len = sbc.read(bb);
-		if (len != bb.capacity())
-			if (len == -1)
-				return bb.put(new byte[bb.remaining()]);
-			else
-				throw new IOException();
+		if (bb.capacity() < size)
+			throw new ShortBufferException();
+		bb.limit(size);
+		
+		int len;
+		synchronized (sbc) {
+			sbc.position(metadataStart(blockID));
+			len = sbc.read(bb);
+		}
+		
+		if (len != bb.limit())
+			throw new IOException("block incomplete or null");
 		bb.flip();
+		
 		if (encryptMetadata) {
 			ByteBuffer iv = bufferIVPool.get();
 			iv.clear();
-			sbc.position(ivStart(blockID));
-			sbc.read(iv);//already read into block so no check on len needed
+			synchronized (sbc) {
+				sbc.position(ivStart(blockID));
+				sbc.read(iv);//already read into block so no check on len needed
+			}
 			Cipher cipher = cipherPool.get();
 			initCipher(cipher, false, blockID, iv.array(), true);
-			ByteBuffer buf = ByteBuffer.allocate(blockSize);//TODO pooling?
+			ByteBuffer buf = ByteBuffer.allocate(blockMetadataSize);//TODO pooling?
 			cipher.doFinal(bb, buf);
 			buf.flip();
-			bb = buf;
+			bb.clear();
+			bb.put(buf);
+			bb.flip();
 		}
-		return bb;
 	}
 	
 	/**
@@ -244,10 +262,8 @@ public class BlockHelper implements Closeable {
 	 * @throws InvalidAlgorithmParameterException
 	 */
 	public void setBlockData(long blockID, ByteBuffer bb, boolean metaData) throws IOException, ShortBufferException, IllegalBlockSizeException, BadPaddingException, InvalidKeyException, InvalidAlgorithmParameterException {
-		if (bb.limit() != (metaData ? blockMetadataSize : blockSize))
+		if (bb.remaining() != (metaData ? blockMetadataSize : blockSize))
 			throw new IOException("buffer remaining is not equals to block(Metadata)Size");
-		//can we trust ByteBuffer size
-		//risk of Overflow attack?
 		
 		ByteBuffer iv = bufferIVPool.get();
 		iv.clear();
@@ -259,11 +275,14 @@ public class BlockHelper implements Closeable {
 				tmp = bufferPool.get();
 			tmp.clear();
 			
-			sbc.position(ivStart(blockID));
-			int len = sbc.read(iv);
+			int len;
+			synchronized (sbc) {
+				sbc.position(ivStart(blockID));
+				len = sbc.read(iv);
+			}
 			if (len == -1) {
 				if (iv.position() != 0)
-					throw new IOException("should not have only part of data here");
+					throw new IOException("should not have partial data here");
 				iv.clear();
 				iv.putLong(0);
 				iv.putInt(0);
@@ -276,22 +295,22 @@ public class BlockHelper implements Closeable {
 			
 			cipher.doFinal(bb, tmp);
 			tmp.flip();
-			tmp.flip();
 			bb = tmp;
 		}
 		
-		if (iv.position() != 0) {
-			iv.flip();
-			sbc.position(ivStart(blockID));
-			sbc.write(iv);
+		synchronized (sbc) {
+			if (iv.position() != 0) {
+				iv.flip();
+				sbc.position(ivStart(blockID));
+				sbc.write(iv);
+			}
+			
+			if (metaData)
+				sbc.position(metadataStart(blockID));
+			else
+				sbc.position(dataStart(blockID));
+			sbc.write(bb);
 		}
-		
-		if (metaData)
-			sbc.position(metadataStart(blockID));
-		else
-			sbc.position(dataStart(blockID));
-		
-		sbc.write(bb);
 	}
 	
 	private long blockStart(long blockID) {
@@ -310,6 +329,14 @@ public class BlockHelper implements Closeable {
 		return blockStart(blockID) + IV_Size + blockMetadataSize + padding;
 	}
 	
+	public int blockMetadataSize() {
+		return blockMetadataSize + (encryptMetadata ? padding : 0);
+	}
+	
+	public int blockSize() {
+		return blockMetadataSize + padding;
+	}
+	
 	@Override
 	public void close() throws IOException {
 		sbc.close();
@@ -325,6 +352,8 @@ public class BlockHelper implements Closeable {
 	public void fill(ByteBuffer bb, boolean metadata) {
 		//int size = metadata ? blockMetadataSize : blockSize;
 		while (bb.hasRemaining()) {
+			if (bb.position() == (metadata ? blockMetadataSize : blockSize))
+				break;
 			bb.put((byte) 0);
 		}
 	}

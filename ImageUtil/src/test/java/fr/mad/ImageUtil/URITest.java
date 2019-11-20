@@ -25,24 +25,35 @@ import javax.crypto.IllegalBlockSizeException;
 import javax.crypto.ShortBufferException;
 import javax.crypto.spec.SecretKeySpec;
 
+import org.apache.commons.collections4.trie.PatriciaTrie;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
-import org.openjdk.jmh.annotations.Benchmark;
 
 import fr.mad.ImageUtil.efs.BlockHelper;
 
 public class URITest {
 	private String pass = "password";
 	
-	@Benchmark
+	@Test
+	public void fat() {
+		long start = Runtime.getRuntime().freeMemory();
+		Map<String, long[]> fat = new PatriciaTrie<>();
+		long[] tmp = new long[] { 0, 1, 2, 3, 455854, 5, 6585556698L, 8, 2, 236, 4, 2, 5, 6, 8 };
+		for (int i = 0; i < 50000; i++) {
+			fat.put(Math.random() + "", tmp);
+		}
+		System.out.println(start - Runtime.getRuntime().freeMemory());
+	}
+	
 	@Test
 	public void blockHelper() throws IOException, InvalidKeyException, ShortBufferException, IllegalBlockSizeException, BadPaddingException, InvalidAlgorithmParameterException, NoSuchAlgorithmException {
 		MessageDigest digest = MessageDigest.getInstance("SHA-256");
 		File dir = new File("test/");
 		dir.mkdir();
 		System.out.println(dir.getAbsolutePath());
-		ByteBuffer bb = ByteBuffer.allocate(128);
+		ByteBuffer bb = ByteBuffer.allocate(1024);
 		ByteBuffer md = ByteBuffer.allocate(128);
 		for (int i = 0; i < bb.capacity(); i++) {
 			bb.put((byte) i);
@@ -55,19 +66,21 @@ public class URITest {
 		System.arraycopy(bytes, 0, pw, 0, 16);
 		map.put("pass", new SecretKeySpec(pw, "AES"));
 		
-		BlockHelper bh = newBlockHelper(map, dir.toPath().resolve("1.efs"), true, md.capacity(), true);
+		dir.toPath().resolve("1.efs").toFile().delete();
+		BlockHelper bh = newBlockHelper(map, dir.toPath().resolve("bh"), true, md.capacity() - 16, true);
 		
 		md.put("metadata.metadata.metadata.metadata".getBytes());
 		bh.fill(md, true);
 		bb.flip();
 		md.flip();
 		
-		for (int i = 0; i < 100000; i++) {
-			//bh.setBlockData(0, bb, false);
-			bh.setBlockData(i, md, true);
-			bh.getBlockMetaData(i);
-			md.flip();
-		}
+		bh.setBlockData(0, md, true);
+		
+		ByteBuffer md2 = ByteBuffer.allocate(md.capacity());
+		bh.getBlockMetaData(0, md2);
+		
+		md.position(0);
+		Assertions.assertTrue(md.compareTo(md) == 0);
 		
 		bh.close();
 	}
@@ -84,10 +97,11 @@ public class URITest {
 	
 	@Test
 	public void fileSystem() throws Exception {
-		
 		String fragment = "path/to/fragment/*#$%$^&*/can be anything!";
 		
-		URI fsLoc = new URI("efs", new File("/test.efs").toURI().toURL().toString(), "");
+		File file;
+		URI fsLoc = new URI("efs", (file = new File("test/fs.efs")).toURI().toString(), "test");
+		file.delete();
 		
 		FileSystem fs = get(fsLoc);
 		
@@ -104,8 +118,8 @@ public class URITest {
 		List<String> list = Files.readAllLines(fragmentPath);
 		list.forEach(System.out::println);
 		
-		Assumptions.assumeTrue("allo".equals(list.get(0)));
-		Assumptions.assumeTrue("bye".equals(list.get(1)));
+		Assertions.assertTrue("allo".equals(list.get(0)));
+		Assertions.assertTrue("bye".equals(list.get(1)));
 	}
 	
 	private FileSystem get(URI fsLoc) throws Exception {
@@ -118,11 +132,10 @@ public class URITest {
 			Security.addProvider(new BouncyCastleProvider());
 			
 			byte[] passB = MessageDigest.getInstance("SHA-256").digest(pass.getBytes());
-			System.arraycopy(passB, 0, passB, 0, 128);
+			byte[] pw = new byte[16];
+			System.arraycopy(passB, 0, pw, 0, 16);
 			
-			env.put("password", passB);
-			env.put("transformation", "AES/CTR/NoPadding");
-			env.put("provider", "BC");
+			env.put("pass", new SecretKeySpec(pw, "AES"));
 			
 			return FileSystems.newFileSystem(fsLoc, env);
 		}

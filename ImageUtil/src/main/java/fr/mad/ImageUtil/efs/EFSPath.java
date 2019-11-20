@@ -118,7 +118,7 @@ public class EFSPath implements Path {
 	
 	@Override
 	public URI toUri() {
-		return URI.create(efs.provider().getScheme() + ":" + efs.id + "#" + fragment);
+		return URI.create(efs.provider().getScheme() + ":" + fragment + "#" + efs.id);
 	}
 	
 	@Override

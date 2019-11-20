@@ -9,9 +9,17 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileAttribute;
 import java.nio.file.attribute.FileAttributeView;
 import java.nio.file.spi.FileSystemProvider;
+import java.security.InvalidAlgorithmParameterException;
+import java.security.InvalidKeyException;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
+
+import javax.crypto.BadPaddingException;
+import javax.crypto.IllegalBlockSizeException;
+import javax.crypto.ShortBufferException;
 
 /**
  * The URI to create a FileSystem ({@link #newFileSystem(URI, Map)}) look like
@@ -33,10 +41,6 @@ public class EFSProvider extends FileSystemProvider {
 	
 	private static final Map<String, EFS> list = new HashMap<>();
 	
-	public static void get(URI uri, String pass) {
-		
-	}
-	
 	@Override
 	public String getScheme() {
 		return "efs";
@@ -55,11 +59,17 @@ public class EFSProvider extends FileSystemProvider {
 		try {
 			sbc = Files.newByteChannel(path, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.READ);
 		} catch (Exception e) {
+			System.out.println("readOnly for " + uri.getFragment());
 			sbc = Files.newByteChannel(path, StandardOpenOption.READ);
 			readOnly = true;
 		}
 		
-		EFS efs = new EFS(this, sbc, readOnly, uri.getFragment(), env);
+		EFS efs;
+		try {
+			efs = new EFS(this, sbc, readOnly, uri.getFragment(), env);
+		} catch (InvalidKeyException | ShortBufferException | IllegalBlockSizeException | BadPaddingException | InvalidAlgorithmParameterException e) {
+			throw new RuntimeException(e);
+		}
 		
 		if (uri.getFragment() != null && !uri.getFragment().isEmpty())
 			list.put(uri.getFragment(), efs);
@@ -82,13 +92,26 @@ public class EFSProvider extends FileSystemProvider {
 	
 	@Override
 	public SeekableByteChannel newByteChannel(Path path, Set<? extends OpenOption> options, FileAttribute<?>... attrs) throws IOException {
-		return new EFSSeekableByteChannel((EFSPath)path,options,attrs);
+		return new EFSSeekableByteChannel((EFSPath) path, options, attrs);
 	}
 	
 	@Override
 	public DirectoryStream<Path> newDirectoryStream(Path dir, Filter<? super Path> filter) throws IOException {
-		// TODO Auto-generated method stub
-		return null;
+		if (!(dir instanceof EFSPath) || ((EFSPath) dir).fragment == null)
+			throw new IOException();
+		EFS efs = (EFS) dir.getFileSystem();
+		Set<Path> set = efs.fat.getKeys().parallelStream().map(s -> (Path) new EFSPath(efs, s)).collect(Collectors.toSet());
+		return new DirectoryStream<Path>() {
+			
+			@Override
+			public void close() throws IOException {
+			}
+			
+			@Override
+			public Iterator<Path> iterator() {
+				return set.iterator();
+			}
+		};
 	}
 	
 	@Override

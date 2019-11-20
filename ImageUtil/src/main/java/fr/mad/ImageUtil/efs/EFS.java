@@ -1,19 +1,19 @@
 package fr.mad.ImageUtil.efs;
 
 import java.io.IOException;
-import java.nio.ByteBuffer;
 import java.nio.channels.SeekableByteChannel;
 import java.nio.file.FileStore;
 import java.nio.file.FileSystem;
 import java.nio.file.Path;
 import java.nio.file.PathMatcher;
 import java.nio.file.WatchService;
+import java.nio.file.attribute.FileAttributeView;
+import java.nio.file.attribute.FileStoreAttributeView;
 import java.nio.file.attribute.UserPrincipalLookupService;
 import java.nio.file.spi.FileSystemProvider;
 import java.security.InvalidAlgorithmParameterException;
 import java.security.InvalidKeyException;
 import java.util.Arrays;
-import java.util.BitSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
@@ -24,58 +24,34 @@ import javax.crypto.BadPaddingException;
 import javax.crypto.IllegalBlockSizeException;
 import javax.crypto.ShortBufferException;
 
-import org.apache.commons.collections4.trie.PatriciaTrie;
-
 import fr.mad.ImageUtil.MapObjectHelper;
 
 public class EFS extends FileSystem {
-	
-	//	Cipher cipher = Cipher.getInstance("AES/CTR/NoPadding","BC");
-	//	cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec("".getBytes(CharsetNames.UTF_8), "AES"));
-	
-	/*
-	 * block - 12 byte = IV - 8 byte = next_block - 2 byte = length
-	 */
-	
 	public final String id;
 	
-	private final BlockHelper blockHelper;
-	private final MapObjectHelper env;
-	private final EFSProvider provider;
-	private boolean readOnly;
+	final BlockHelper blockHelper;
+	final MapObjectHelper env;
+	final EFSProvider provider;
+	final boolean readOnly;
+	final FAT fat;
 	
-	private PatriciaTrie<Long> fat;
-	private BitSet blockUsed;
+	private SeekableByteChannel sbc;
 	
 	public EFS(EFSProvider provider, SeekableByteChannel sbc, boolean readOnly, String id, Map<String, ?> map) throws IOException, ShortBufferException, IllegalBlockSizeException, BadPaddingException, InvalidKeyException, InvalidAlgorithmParameterException {
 		this.provider = provider;
 		this.readOnly = readOnly;
 		this.id = id;
+		this.sbc = sbc;
 		env = new MapObjectHelper(map);
 		
-		if (env.get("blockSize", 1024) < 512)
+		if (env.get("blockSize", 1024 * 512) < 512)
 			throw new IllegalArgumentException("blockSize < 512");
 		
-		blockHelper = new BlockHelper(env, sbc, (short) 0, false, readOnly);
-		fat = new PatriciaTrie<Long>();
-		blockUsed = new BitSet(1024);
-		
-		ByteBuffer bb = blockHelper.getBlockData(0);
-		ByteBuffer buf = ByteBuffer.allocate(bb.capacity());
-		buf.put(buf);
-		buf.flip();
-		long nBlock = bb.getLong();
-		for (int i = 0; i < nBlock; i++) {
-			if (buf.remaining() < 16) {
-				buf.clear();
-				buf.put(blockHelper.getBlockData(bb.getLong()));
-				buf.flip();
-			}
-			long blockID = buf.getLong();
-			bb = blockHelper.getBlockMetaData(blockID);
-			
-		}
+		blockHelper = new BlockHelper(env, sbc, (short) 1024, env.get("encryptMetaData", true), readOnly);
+		fat = new FAT(env, blockHelper);
 	}
+	
+	
 	
 	@Override
 	public FileSystemProvider provider() {
@@ -109,7 +85,58 @@ public class EFS extends FileSystem {
 	
 	@Override
 	public Iterable<FileStore> getFileStores() {
-		return null;
+		return Arrays.asList(new FileStore() {
+			
+			@Override
+			public String name() {
+				return null;
+			}
+			
+			@Override
+			public String type() {
+				return null;
+			}
+			
+			@Override
+			public boolean isReadOnly() {
+				return readOnly;
+			}
+			
+			@Override
+			public long getTotalSpace() throws IOException {
+				return sbc.size();
+			}
+			
+			@Override
+			public long getUsableSpace() throws IOException {
+				return 0;
+			}
+			
+			@Override
+			public long getUnallocatedSpace() throws IOException {
+				return 0;
+			}
+			
+			@Override
+			public boolean supportsFileAttributeView(Class<? extends FileAttributeView> type) {
+				return false;
+			}
+			
+			@Override
+			public boolean supportsFileAttributeView(String name) {
+				return false;
+			}
+			
+			@Override
+			public <V extends FileStoreAttributeView> V getFileStoreAttributeView(Class<V> type) {
+				return null;
+			}
+			
+			@Override
+			public Object getAttribute(String attribute) throws IOException {
+				return null;
+			}
+		});
 	}
 	
 	@Override
